@@ -1,98 +1,71 @@
-import React, { useState } from "react";
-import {
-  Container,
-  TextField,
-  Button,
-  Typography,
-  Card,
-  CardContent,
-  Box,
-} from "@mui/material";
-import axios from "axios";
+const express = require('express');
+const { v4: uuidv4 } = require('uuid');
+const cors = require('cors');
 
-function App() {
-  const [url, setUrl] = useState("");
-  const [validity, setValidity] = useState(10);
-  const [shortLink, setShortLink] = useState(null);
-  const [stats, setStats] = useState(null);
+const app = express();
+app.use(express.json());
+app.use(cors());
 
-  const handleShorten = async () => {
-    try {
-      const res = await axios.post("http://localhost:5000/shorturls", {
-        url,
-        validity,
-      });
-      setShortLink(res.data.shortLink);
-      setStats(null);
-    } catch (err) {
-      console.error(err);
-    }
-  };
+// Custom Logging Middleware
+app.use((req, res, next) => {
+  const now = new Date().toISOString();
+  console.log(`[${now}] ${req.method} ${req.url}`);
+  next();
+});
 
-  const fetchStats = async () => {
-    if (!shortLink) return;
-    const shortCode = shortLink.split("/").pop();
-    try {
-      const res = await axios.get(`http://localhost:5000/shorturls/${shortCode}`);
-      setStats(res.data);
-    } catch (err) {
-      console.error(err);
-    }
-  };
+// In-memory storage
+let urls = {};
 
-  return (
-    <Container maxWidth="sm" sx={{ mt: 5 }}>
-      <Typography variant="h4" align="center" gutterBottom>
-        🔗 URL Shortener
-      </Typography>
+// POST /shorturls -> Create short URL
+app.post('/shorturls', (req, res) => {
+  const { url, validity = 30, shortcode } = req.body;
 
-      <Card>
-        <CardContent>
-          <TextField
-            label="Enter URL"
-            variant="outlined"
-            fullWidth
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            sx={{ mb: 2 }}
-          />
-          <TextField
-            label="Validity (minutes)"
-            type="number"
-            variant="outlined"
-            fullWidth
-            value={validity}
-            onChange={(e) => setValidity(e.target.value)}
-            sx={{ mb: 2 }}
-          />
-          <Button variant="contained" color="primary" fullWidth onClick={handleShorten}>
-            Shorten URL
-          </Button>
-        </CardContent>
-      </Card>
+  if (!url) return res.status(400).json({ error: 'URL is required' });
 
-      {shortLink && (
-        <Box mt={3} textAlign="center">
-          <Typography variant="h6">✅ Short URL:</Typography>
-          <a href={shortLink} target="_blank" rel="noreferrer">
-            {shortLink}
-          </a>
-          <Box mt={2}>
-            <Button variant="outlined" onClick={fetchStats}>
-              View Stats
-            </Button>
-          </Box>
-        </Box>
-      )}
+  let code = shortcode || uuidv4().slice(0, 6);
+  if (urls[code]) return res.status(400).json({ error: 'Shortcode already exists' });
 
-      {stats && (
-        <Box mt={3}>
-          <Typography variant="h6">📊 Stats:</Typography>
-          <pre>{JSON.stringify(stats, null, 2)}</pre>
-        </Box>
-      )}
-    </Container>
-  );
-}
+  const expiry = new Date(Date.now() + validity * 60000).toISOString();
 
-export default App;
+  urls[code] = { url, expiry, clicks: [] };
+
+  res.status(201).json({
+    shortLink: `http://localhost:5000/${code}`,
+    expiry,
+  });
+});
+
+// GET /:code -> Redirect to original URL
+app.get('/:code', (req, res) => {
+  const { code } = req.params;
+  const entry = urls[code];
+
+  if (!entry) return res.status(404).json({ error: 'Shortcode not found' });
+  if (new Date() > new Date(entry.expiry))
+    return res.status(410).json({ error: 'Link expired' });
+
+  entry.clicks.push({
+    timestamp: new Date().toISOString(),
+    referrer: req.get('Referrer') || 'direct',
+  });
+
+  res.redirect(entry.url);
+});
+
+// GET /shorturls/:code -> Stats
+app.get('/shorturls/:code', (req, res) => {
+  const entry = urls[req.params.code];
+  if (!entry) return res.status(404).json({ error: 'Shortcode not found' });
+
+  res.json({
+    originalURL: entry.url,
+    expiry: entry.expiry,
+    totalClicks: entry.clicks.length,
+    clicks: entry.clicks,
+  });
+});
+
+// Start server
+app.listen(5000, () => {
+  console.log('Backend running on http://localhost:5000');
+});
